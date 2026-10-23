@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.api — Multi-stage build for the NestJS API service
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: Builder ──────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifests first (better layer caching)
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY packages/ ./packages/
+COPY services/api/package.json ./services/api/
+
+# Install only production deps for the workspace
+RUN pnpm install --frozen-lockfile --filter @webinar/api...
+
+# Copy source and build
+COPY services/api/ ./services/api/
+RUN pnpm --filter @webinar/api build
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM node:20-alpine AS runtime
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifests
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY packages/ ./packages/
+COPY services/api/package.json ./services/api/
+
+# Install ONLY production dependencies
+RUN pnpm install --frozen-lockfile --prod --filter @webinar/api...
+
+# Copy compiled output from builder
+COPY --from=builder /app/services/api/dist ./services/api/dist
+
+# Non-root user for security
+RUN addgroup -S webinar && adduser -S webinar -G webinar
+USER webinar
+
+ENV NODE_ENV=production
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "services/api/dist/main.js"]
